@@ -1,0 +1,163 @@
+PROGRAM anisot
+
+  ! Modeling seismic waves in 3-D TI media
+
+  USE mdle_source
+  USE mdle_prop
+  USE mdle_utils
+  USE mdle_io_utils                                                  
+  USE mdle_taper
+  USE mdle_fft
+
+  IMPLICIT NONE
+  REAL, DIMENSION(:,:,:), ALLOCATABLE :: Vx,Vz,Sxx,Sxz,Szz
+  REAL, DIMENSION(:,:,:), ALLOCATABLE :: Vy,Syy,Sxy,Syz
+
+  INTEGER :: Nx,Ny,Nz
+  REAL    :: dx,dt,fpeak
+  INTEGER :: itmax
+  INTEGER :: lx, lz
+  INTEGER :: ly
+  REAL    :: r
+
+  REAL, DIMENSION(:,:,:), ALLOCATABLE :: C11,C13,C33,C44,C12,C66
+  REAL, DIMENSION(:,:,:), ALLOCATABLE :: rhox
+
+  REAL, DIMENSION(:,:,:), ALLOCATABLE :: source
+  REAL, DIMENSION(:),   ALLOCATABLE :: trs
+  REAL    :: tdelay
+
+  REAL :: F
+  REAL, DIMENSION(:),   ALLOCATABLE :: taper
+  INTEGER :: nb,fsf
+
+  REAL    :: t
+  INTEGER :: it,i,j,k
+  INTEGER :: aux,ir
+
+  INTEGER :: iy_csg
+  REAL, DIMENSION(:,:), ALLOCATABLE :: csg_vx,csg_vz
+  REAL, DIMENSION(:,:), ALLOCATABLE :: csg_vy
+  INTEGER :: nphones,npmin_x,npmin_z,dnp_x,dnp_z
+  INTEGER :: npmin_y,dnp_y
+  INTEGER :: n1,n2,n3,n4,n5,n6
+  INTEGER :: isnap,nsnaps,snapmin,dsnap,iy_snap
+
+  REAL, DIMENSION(:), ALLOCATABLE  :: trig_x,trig_y,trig_z
+  INTEGER, DIMENSION(:), ALLOCATABLE  :: ifax_x,ifax_y,ifax_z
+  INTEGER  :: nfac_x,nfac_y,nfac_z
+  REAL, DIMENSION(:), ALLOCATABLE  :: rkx,rky,rkz
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  PRINT*,'anisot - Modeling seismic waves in 3-D anisotropic media'
+
+  CALL inputdata(Nx,Ny,Nz,dx,dt,fpeak,itmax,lx,ly,lz,r,&
+       nphones,npmin_x,npmin_y,npmin_z,dnp_x,dnp_y,dnp_z,&
+       nsnaps,snapmin,dsnap,iy_snap,nb,F,fsf)
+
+  ALLOCATE(taper(nb))
+  CALL bt_exp_create(taper,nb,F)
+
+  ALLOCATE(C11(Nx,Ny,Nz),C13(Nx,Ny,Nz),C33(Nx,Ny,Nz),C44(Nx,Ny,Nz))
+  ALLOCATE(C12(Nx,Ny,Nz),C66(Nx,Ny,Nz))
+  ALLOCATE(rhox(Nx,Ny,Nz))
+
+  CALL inputmodel(Nx,Ny,Nz,C11,C13,C33,C44,C66,rhox)
+
+  C11=C11*1e10;   C33=C33*1e10;   C44=C44*1e10;   C13=C13*1e10; 
+  C66=C66*1e10; 
+  C12 = C11 - 2.0*C66
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  CALL quads(itmax,aux)
+  ALLOCATE(trs(aux))
+
+  ! Source memory function
+  CALL source_init(trs,dt,aux,fpeak,tdelay)
+
+  ! Initialize fft vectors
+  ALLOCATE(trig_x(2*Nx),ifax_x(Nx),rkx(Nx))
+  ALLOCATE(trig_y(2*Ny),ifax_y(Ny),rky(Ny))
+  ALLOCATE(trig_z(2*Nz),ifax_z(Nz),rkz(Nz))
+  call fft_init(Nx,trig_x,ifax_x,nfac_x,dx,rkx)
+  call fft_init(Ny,trig_y,ifax_y,nfac_y,dx,rky)
+  call fft_init(Nz,trig_z,ifax_z,nfac_z,dx,rkz)
+
+  OPEN(76,FILE="source.ad",STATUS='UNKNOWN',ACCESS='DIRECT', &
+       ACTION='WRITE', FORM='UNFORMATTED', RECL=aux*4)
+  WRITE(76, REC=1) trs(:)
+
+  ! PRINT*,'tdelay',tdelay
+  ! PRINT*,'amostras da fonte:',FLOOR(2*tdelay/dt)
+  ir = CEILING(r)
+  ALLOCATE(source(2*ir+1,2*ir+1,2*ir+1))
+  ALLOCATE(csg_vx(itmax,nphones),csg_vz(itmax,nphones))
+  ALLOCATE(csg_vy(itmax,nphones))
+
+  n1=31; n2=32; n3=33; n4=34; n5=35; n6=36
+  OPEN(n1,FILE="csg_Vx.ad",STATUS='UNKNOWN',ACCESS='DIRECT', &
+       ACTION='WRITE', FORM='UNFORMATTED', RECL=itmax*4)
+  OPEN(n2,FILE="csg_Vy.ad",STATUS='UNKNOWN',ACCESS='DIRECT', &
+       ACTION='WRITE', FORM='UNFORMATTED', RECL=itmax*4)
+  OPEN(n3,FILE="csg_Vz.ad",STATUS='UNKNOWN',ACCESS='DIRECT', &
+       ACTION='WRITE', FORM='UNFORMATTED', RECL=itmax*4)
+  OPEN(n4,FILE="snapshots_Vx.ad",STATUS='UNKNOWN',ACCESS='DIRECT', &
+       ACTION='WRITE', FORM='UNFORMATTED', RECL=Nz*4)
+  OPEN(n5,FILE="snapshots_Vy.ad",STATUS='UNKNOWN',ACCESS='DIRECT', &
+       ACTION='WRITE', FORM='UNFORMATTED', RECL=Nz*4)
+  OPEN(n6,FILE="snapshots_Vz.ad",STATUS='UNKNOWN',ACCESS='DIRECT', &
+       ACTION='WRITE', FORM='UNFORMATTED', RECL=Nz*4)
+
+  ALLOCATE(Vx(Nx,Ny,Nz),Vz(Nx,Ny,Nz),Sxx(Nx,Ny,Nz),Sxz(Nx,Ny,Nz),&
+       Szz(Nx,Ny,Nz))
+  ALLOCATE(Vy(Nx,Ny,Nz),Syy(Nx,Ny,Nz),Sxy(Nx,Ny,Nz),Syz(Nx,Ny,Nz))
+
+  Sxx=0.; Sxz=0.; Szz=0.; Vx=0.; Vz=0.
+  Syy=0.; Sxy=0.; Syz=0.; Vy=0.
+  rhox=1./rhox
+
+  isnap=0
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+  ! Time loop
+  DO it=1,itmax
+     t=it*dt
+     OPEN(77,FILE="status.txt",STATUS='UNKNOWN',ACTION='WRITE')
+     WRITE(77,*) 'anisot - Modeling seismic waves in 3-D anisotropic media'
+     WRITE(77,*) 'Iteracao',it,'/',itmax,' Vx(lx+5,ly+5,lz+5)=',&
+          Vx(lx+5,ly+5,lz+5)
+     CLOSE(77)
+
+     ! Insert source function 
+     CALL source_UU1_3D(t,it,trs,source,r,tdelay)
+     Vx(lx-ir:lx+ir,ly-ir:ly+ir,lz-ir:lz+ir) = & 
+          Vx(lx-ir:lx+ir,ly-ir:ly+ir,lz-ir:lz+ir) + source    
+     CALL source_UU2_3D(t,it,trs,source,r,tdelay)
+     Vy(lx-ir:lx+ir,ly-ir:ly+ir,lz-ir:lz+ir) = & 
+          Vy(lx-ir:lx+ir,ly-ir:ly+ir,lz-ir:lz+ir) + source    
+     CALL source_UU3_3D(t,it,trs,source,r,tdelay)
+     Vz(lx-ir:lx+ir,ly-ir:ly+ir,lz-ir:lz+ir) = &
+          Vz(lx-ir:lx+ir,ly-ir:ly+ir,lz-ir:lz+ir) + source
+
+     ! Do one time step
+     CALL prop_anisot3D(Vx,Vy,Vz,Sxx,Sxy,Sxz,Syy,Syz,Szz,&
+          C11,C12,C13,C33,C44,C66,rhox,dx,dt,Nx,Ny,Nz,&
+          trig_x,ifax_x,nfac_x,rkx,trig_y,ifax_y,nfac_y,rky,&
+          trig_z,ifax_z,nfac_z,rkz)
+
+     PRINT*,'it',it,'/',itmax,' Vx(lx+5,ly+5,lz+5)=',Vx(lx+5,ly+5,lz+5)
+
+     ! Output
+     CALL save_shotgather_n_snapshots3D(csg_vx,csg_vy,csg_vz,Vx,Vy,Vz,&
+          nphones,npmin_x,npmin_y,npmin_z,dnp_x,dnp_y,dnp_z,&
+          isnap,nsnaps,snapmin,dsnap,n1,n2,n3,n4,n5,n6,Nx,Ny,&
+          Nz,it,itmax,iy_snap)
+
+     ! Boundary taper
+     CALL bt_apply_multiple(Vx,Vy,Vz,Sxx,Sxy,Sxz,Syy,Syz,Szz,&
+          Nx,Ny,Nz,nb,taper)
+
+  END DO
+  PRINT*,'Successful run.'
+
+END PROGRAM anisot
